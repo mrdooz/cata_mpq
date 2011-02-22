@@ -1,0 +1,29 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "cata_mpq", "cata_mpq.vcxproj", "{65153DBD-6E8E-4F86-864C-82C5DADEB9F0}"
+	ProjectSection(ProjectDependencies) = postProject
+		{B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3} = {B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "celsus", "..\celsus\celsus.vcxproj", "{B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{65153DBD-6E8E-4F86-864C-82C5DADEB9F0}.Debug|Win32.ActiveCfg = Debug|Win32
+		{65153DBD-6E8E-4F86-864C-82C5DADEB9F0}.Debug|Win32.Build.0 = Debug|Win32
+		{65153DBD-6E8E-4F86-864C-82C5DADEB9F0}.Release|Win32.ActiveCfg = Release|Win32
+		{65153DBD-6E8E-4F86-864C-82C5DADEB9F0}.Release|Win32.Build.0 = Release|Win32
+		{B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3}.Debug|Win32.ActiveCfg = Debug|Win32
+		{B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3}.Debug|Win32.Build.0 = Debug|Win32
+		{B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3}.Release|Win32.ActiveCfg = Release|Win32
+		{B0C69191-64BF-4FA6-81C4-1BDF6DDE7CE3}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
