@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include <celsus/MemoryMappedFile.hpp>
 #include <cassert>
+#include <celsus/celsus.hpp>
 
 // infos from http://wiki.devklog.net/index.php?title=The_MoPaQ_Archive_Format
 
@@ -12,6 +13,7 @@ public:
 	bool open(const char *filename);
 	void seek(uint64_t ofs, int org) const;
 	bool read(void *buf, uint32_t len, uint32_t *bytes_read) const;
+	bool read_ofs(void *buf, uint64_t ofs, uint32_t len, uint32_t *bytes_read) const;
 	uint64_t filesize() const { return _file_size; }
 private:
 	HANDLE _file;
@@ -60,13 +62,33 @@ struct MpqHeader
 	uint8_t md5_mpq_header[MD5_DIGEST_SIZE];
 };
 
-struct BlockTableEntry
-{
+struct BlockTableEntry {
 	int32_t ofs;
 	int32_t len;
 	int32_t file_size;
 	int32_t flags;
 };
+
+enum BlockTableFlags {
+	kBtFlagsFile           = 0x80000000,
+	kBtFlagsChecksum       = 0x04000000,
+	kBtFlagsDeletionmarker = 0x20000000,
+	kBtFlagsSingleUnit     = 0x10000000,
+	kBtFlagsAdjustedKey    = 0x00020000,
+	kBtFlagsEncrypted      = 0x00010000,
+	kBtFlagsCompressed     = 0x00000200,
+	kBtFlagsImploded       = 0x00000100,
+};
+
+struct HashTableEntry {
+	uint32_t hash_a;  // file path hash, using method a
+	uint32_t hash_b;  // file path hash, using method b
+	int16_t language;
+	int8_t platform;
+	int8_t padding;
+	int32_t block_table_index;
+};
+
 
 #define HET_TABLE_SIGNATURE 0x1A544548      // 'HET\x1a'
 #define BET_TABLE_SIGNATURE 0x1A544542      // 'BET\x1a'
@@ -260,9 +282,9 @@ void decrypt_data(void *lpbyBuffer, uint32_t dwLength, uint32_t dwKey)
 // Different types of hashes to make with hash_string
 enum HashType {
 	HashTypeTableOffset = 0,
-	HashTypeNameA = 1,
-	HashTypeNameB = 2,
-	HashTypeFileKey = 3,
+	HashTypeMethodA = 1,
+	HashTypeMethodB = 2,
+	HashTypeBlockTable = 3,
 };
 /*
 #define MPQ_HASH_TABLE_OFFSET	0
@@ -296,10 +318,10 @@ uint32_t compute_file_key(const char *lpszFilePath, const BlockTableEntry &block
 	lpszFileName = lpszFilePath;
 
 	// Hash the name to get the base key
-	uint32_t nFileKey = hash_string(lpszFileName, HashTypeFileKey);
+	uint32_t nFileKey = hash_string(lpszFileName, HashTypeBlockTable);
 
 	// Offset-adjust the key if necessary
-	if (blockEntry.flags & BLOCK_OFFSET_ADJUSTED_KEY)
+	if (blockEntry.flags & kBtFlagsAdjustedKey)
 		nFileKey = (nFileKey + blockEntry.ofs) ^ blockEntry.file_size;
 
 	return nFileKey;
@@ -349,7 +371,7 @@ void read_hash_table(MpqHeader *header, void *data)
 
 void read_het_table(MpqHeader *header, void *data)
 {
-	ExtendedTableHeader *p = (ExtendedTableHeader *)((byte *)data + header->het_table_offset64);
+	ExtendedTableHeader *p = (ExtendedTableHeader *)data;
 	int a = 10;
 }
 
@@ -386,6 +408,12 @@ bool FileReader::read(void *buf, uint32_t len, uint32_t *bytes_read) const
 	return true;
 }
 
+bool FileReader::read_ofs(void *buf, uint64_t ofs, uint32_t len, uint32_t *bytes_read) const
+{
+	seek(ofs, FILE_BEGIN);
+	return read(buf, len, bytes_read);
+}
+
 bool FileReader::open(const char *filename)
 {
 	_file = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -402,12 +430,9 @@ bool FileReader::open(const char *filename)
 int _tmain(int argc, _TCHAR* argv[])
 {
 	init_crypt_table();
-	uint32_t nFileKey = hash_string("(listfile)", HashTypeFileKey);
 
 	// todo: build some kind of windowed wrapper on top of this..
 	FileReader f;
-	void *data;
-	uint64_t size;
 	if (!f.open("expansion3.mpq"))
 		return 1;
 
@@ -422,15 +447,61 @@ int _tmain(int argc, _TCHAR* argv[])
 	if (header.format_version != 3)
 		return 1;
 
+	// read the block table
+	int bt_size = header.block_table_entries * sizeof(BlockTableEntry);
+	BlockTableEntry *block_table = new BlockTableEntry[header.block_table_entries];
+	f.read_ofs(block_table, ((uint64_t)header.block_table_offset_high << 32) + header.block_table_offset, bt_size, NULL);
+	uint32_t bt_key = hash_string("(block table)", HashTypeBlockTable);
+	decrypt_data(block_table, bt_size/4, bt_key);
+
+	// read the hash table
+	int ht_size = header.hash_table_entries * sizeof(HashTableEntry);
+	HashTableEntry *hash_table = new HashTableEntry[header.hash_table_entries];
+	f.read_ofs(hash_table, ((uint64_t)header.hash_table_offset_high << 32) + header.hash_table_offset, ht_size, NULL);
+	uint32_t ht_key = hash_string("(hash table)", HashTypeBlockTable);
+	decrypt_data(hash_table, ht_size/4, ht_key);
+
+	uint32_t lf_hashes[] = {
+		hash_string("(listfile)", 0),
+		hash_string("(listfile)", 1),
+		hash_string("(listfile)", 2),
+		hash_string("(listfile)", 3),
+		hash_string("(listfile)", 4),
+		hash_string("(listfile)", 5),
+	};
+
+	for (int i = 0; i < header.hash_table_entries; ++i) {
+		HashTableEntry *cur = &hash_table[i];
+		uint32_t a = hash_table[i].hash_a;
+		uint32_t b = hash_table[i].hash_b;
+		for (int j = 0; j < ELEMS_IN_ARRAY(lf_hashes); ++j) {
+			if (lf_hashes[j] == a || lf_hashes[j] == b) {
+				int bb = 10;
+			}
+		}
+	}
+
+
+
+	delete [] block_table;
+	delete [] hash_table;
+
+	
+
+	int cBufferSize = 16 * 1024;
+	void *data = new byte[cBufferSize];
+
 	if (header.het_table_offset64) {
-		//f.lock((size_t)header.het_table_offset64, (size_t)header.het_table_size64);
-		read_het_table(&header, data);
-		//f.lock((size_t)header.bet_table_offset64, (size_t)header.bet_table_size64);
-		read_bet_table(&header, data);
+		ExtendedTableHeader ext_header;
+		f.read_ofs((void *)&ext_header, header.het_table_offset64, sizeof(ext_header), NULL);
+		void *buf = new byte[ext_header.data_size];
+		f.read_ofs(buf, header.het_table_offset64 + sizeof(ext_header), ext_header.data_size, NULL);
+		int a = 10;
 	}
 
 	read_block_table(&header, data);
 
+	delete [] data;
 
 
 	return 0;
