@@ -96,9 +96,18 @@ struct HashTableEntry {
 //-----------------------------------------------------------------------------
 // Local structures
 
-// Structure for HET table header
-typedef struct _HET_TABLE_HEADER
-{
+// Header for HET and BET tables
+#pragma pack(push, 1)
+struct ExtTableHeader {
+	uint32_t dwSignature;                      // 'HET\x1A' or 'BET\x1A'
+	uint32_t dwVersion;                        // Version. Seems to be always 1
+	uint32_t dwDataSize;                       // Size of the contained table
+
+	// Followed by the table header
+	// Followed by the table data
+};
+
+struct HetTable : public ExtTableHeader {
 	uint32_t dwTableSize;                      // Size of the entire hash table, including the header (in bytes)
 	uint32_t dwFileCount;                      // Number of used file entries in the HET table
 	uint32_t dwHashTableSize;                  // Size of the hash table, (in bytes)
@@ -107,12 +116,9 @@ typedef struct _HET_TABLE_HEADER
 	uint32_t dwUnknown14;
 	uint32_t dwIndexSize;                      // Effective size of the index entry
 	uint32_t dwBlockTableSize;                 // Size of the block index subtable (in bytes)
+};
 
-} HET_TABLE_HEADER, *PHET_TABLE_HEADER;
-
-// Structure for BET table header
-typedef struct _BET_TABLE_HEADER
-{
+struct BetTable : public ExtTableHeader {
 	uint32_t dwTableSize;                      // Size of the entire hash table, including the header (in bytes)
 	uint32_t dwFileCount;                      // Number of files in the ext block table
 	uint32_t dwUnknown08;
@@ -132,8 +138,9 @@ typedef struct _BET_TABLE_HEADER
 	uint32_t NameHash2Size;                    // Effective size of NameHashPart2 (in bits)
 	uint32_t dwUnknown44;
 	uint32_t dwFlagCount;                      // Number of flags in the following array
+};
+#pragma pack(pop)
 
-} BET_TABLE_HEADER, *PBET_TABLE_HEADER;
 
 typedef struct _MPQ_FILE_BLOCK_ENTRY
 {
@@ -168,16 +175,6 @@ typedef struct _BIT_ARRAY
 
 } BIT_ARRAY, *PBIT_ARRAY;
 
-// Header for HET and BET tables
-struct TMPQExtTable
-{
-	uint32_t dwSignature;                      // 'HET\x1A' or 'BET\x1A'
-	uint32_t dwVersion;                        // Version. Seems to be always 1
-	uint32_t dwDataSize;                       // Size of the contained table
-
-	// Followed by the table header
-	// Followed by the table data
-};
 
 struct ExtendedTableHeader
 {
@@ -460,6 +457,12 @@ int _tmain(int argc, _TCHAR* argv[])
 	f.read_ofs(hash_table, ((uint64_t)header.hash_table_offset_high << 32) + header.hash_table_offset, ht_size, NULL);
 	uint32_t ht_key = hash_string("(hash table)", HashTypeBlockTable);
 	decrypt_data(hash_table, ht_size/4, ht_key);
+
+	// read the het table
+	ExtTableHeader het_header;
+	f.read_ofs((void *)&het_header, header.het_table_offset64, sizeof(het_header), NULL);
+
+	// read the bet table
 
 	uint32_t lf_hashes[] = {
 		hash_string("(listfile)", 0),
