@@ -2,8 +2,17 @@
 #include <celsus/MemoryMappedFile.hpp>
 #include <cassert>
 #include <celsus/celsus.hpp>
+#include <boost/scoped_array.hpp>
+#include "md5.h"
+
+using namespace std;
+using namespace boost;
 
 // infos from http://wiki.devklog.net/index.php?title=The_MoPaQ_Archive_Format
+
+extern "C" {
+	void hashlittle2( const void *key, size_t length, uint32_t *pc, uint32_t *pb);
+};
 
 class FileReader
 {
@@ -57,8 +66,8 @@ struct MpqHeader
 	uint8_t md5_block_table[MD5_DIGEST_SIZE];
 	uint8_t md5_hash_table[MD5_DIGEST_SIZE];
 	uint8_t md5_hi_block_table[MD5_DIGEST_SIZE];
-	uint8_t md5_unknown0[MD5_DIGEST_SIZE];
-	uint8_t md5_unknown1[MD5_DIGEST_SIZE];
+	uint8_t md5_bet_table[MD5_DIGEST_SIZE];
+	uint8_t md5_het_table[MD5_DIGEST_SIZE];
 	uint8_t md5_mpq_header[MD5_DIGEST_SIZE];
 };
 
@@ -423,6 +432,49 @@ bool FileReader::open(const char *filename)
 	return true;
 }
 
+bool verify_md5(const byte *data, int len, const byte *digest)
+{
+	md5_state_s md5;
+	md5_init(&md5);
+	md5_append(&md5, data, len);
+	byte d[MD5_DIGEST_SIZE];
+	md5_finish(&md5, d);
+	return memcmp(d, digest, MD5_DIGEST_SIZE) == 0;
+}
+
+template <typename T>
+T fill_bits(int n)
+{
+	if (n == sizeof(T) * 8)
+		return ~0;
+	// return a mask that fill up to bit n
+	return ((T)1 << n) - 1;
+}
+
+template <typename T>
+bool bit_compare(const T *base, int ofs, T key, uint32_t len)
+{
+	// look for key of length len bits, starting at base + ofs (ofs is in bits)
+	const T TSize = 8 * sizeof(T);
+
+	T ofs_mod = ofs % (TSize-1);
+	// do we need to compare across boundaries?
+	if (TSize - ofs_mod >= len) {
+		// no
+		T key_mask = fill_bits<T>(len);
+		return ((base[ofs / sizeof(T)] >> ofs_mod) & key_mask) == (key & key_mask);
+	} 
+
+	// calc upper and lower mask
+	T l = TSize - ofs_mod;  // # bits used in lower compare
+	T h = len - l;          // # bits used in upper compare
+	T lower_key_mask = fill_bits<T>(l);
+	T upper_key_mask = fill_bits<T>(h);
+	return 
+		(((base[ofs / sizeof(T)] >> ofs_mod) & lower_key_mask) == (key & lower_key_mask)) &&
+		((base[ofs / sizeof(T) + 1] & upper_key_mask) == ((key >> l) & upper_key_mask));
+}
+
 
 int _tmain(int argc, _TCHAR* argv[])
 {
@@ -446,21 +498,54 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	// read the block table
 	int bt_size = header.block_table_entries * sizeof(BlockTableEntry);
-	BlockTableEntry *block_table = new BlockTableEntry[header.block_table_entries];
-	f.read_ofs(block_table, ((uint64_t)header.block_table_offset_high << 32) + header.block_table_offset, bt_size, NULL);
+
+	scoped_array<BlockTableEntry> block_table(new BlockTableEntry[header.block_table_entries]);
+	f.read_ofs(block_table.get(), ((uint64_t)header.block_table_offset_high << 32) + header.block_table_offset, bt_size, NULL);
 	uint32_t bt_key = hash_string("(block table)", HashTypeBlockTable);
-	decrypt_data(block_table, bt_size/4, bt_key);
+	decrypt_data(block_table.get(), bt_size/4, bt_key);
 
 	// read the hash table
 	int ht_size = header.hash_table_entries * sizeof(HashTableEntry);
-	HashTableEntry *hash_table = new HashTableEntry[header.hash_table_entries];
-	f.read_ofs(hash_table, ((uint64_t)header.hash_table_offset_high << 32) + header.hash_table_offset, ht_size, NULL);
+	scoped_array<HashTableEntry> hash_table(new HashTableEntry[header.hash_table_entries]);
+	f.read_ofs(hash_table.get(), ((uint64_t)header.hash_table_offset_high << 32) + header.hash_table_offset, ht_size, NULL);
 	uint32_t ht_key = hash_string("(hash table)", HashTypeBlockTable);
-	decrypt_data(hash_table, ht_size/4, ht_key);
+	decrypt_data(hash_table.get(), ht_size/4, ht_key);
 
 	// read the het table
-	ExtTableHeader het_header;
-	f.read_ofs((void *)&het_header, header.het_table_offset64, sizeof(het_header), NULL);
+	if (!header.het_table_offset64)
+		return 1;
+
+	scoped_array<byte> het_data(new byte[(uint32_t)header.het_table_size64]);
+	f.read_ofs(het_data.get(), header.het_table_offset64, (uint32_t)header.het_table_size64, NULL);
+	if (!verify_md5(het_data.get(), (int)header.het_table_size64, header.md5_het_table))
+		return 1;
+
+	const HetTable *het_header = (HetTable *)het_data.get();
+	decrypt_data(het_data.get() + sizeof(ExtendedTableHeader), het_header->dwDataSize, hash_string("(hash table)", HashTypeBlockTable));
+	if (het_header->dwDataSize != het_header->dwTableSize)
+		return 1;
+
+	uint32_t a, b;
+	const char *listfile = "(listfile)";
+	hashlittle2(listfile, strlen(listfile), &a, &b);
+	uint64_t h = (((uint64_t)a) << 32) | b;
+
+// mask the hash if needed (and set highest bit to 1)
+	uint64_t and_mask = het_header->dwHashEntrySize != 64 ? ((uint64_t)1 << het_header->dwHashEntrySize) - 1 : ~0;
+	h |= ((uint64_t)1 << (het_header->dwHashEntrySize - 1));
+
+	// het uses the highest 8 bits
+	uint8_t het_hash = (uint8_t)(h >> (het_header->dwHashEntrySize - 8));
+
+	// bet uses rest
+	uint64_t bet_hash = h & (and_mask >> 8);
+
+	uint32_t aa = 0x3 << 15;
+	bool k = bit_compare<uint16_t>((uint16_t *)&aa, 15, 0x3, 2);
+
+
+	//TMPQHetTable *het_table = (TMPQHetTable *)((byte *)het_data.get() + sizeof(HetTable));
+
 
 	// read the bet table
 
@@ -486,10 +571,6 @@ int _tmain(int argc, _TCHAR* argv[])
 
 
 
-	delete [] block_table;
-	delete [] hash_table;
-
-	
 
 	int cBufferSize = 16 * 1024;
 	void *data = new byte[cBufferSize];
