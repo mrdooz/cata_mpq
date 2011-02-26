@@ -3,6 +3,7 @@
 #include <cassert>
 #include <celsus/celsus.hpp>
 #include <boost/scoped_array.hpp>
+#include <limits>
 #include "md5.h"
 
 using namespace std;
@@ -457,12 +458,12 @@ bool bit_compare(const T *base, int ofs, T key, uint32_t len)
 	// look for key of length len bits, starting at base + ofs (ofs is in bits)
 	const T TSize = 8 * sizeof(T);
 
-	T ofs_mod = ofs % (TSize-1);
+	T ofs_mod = ofs % TSize;
 	// do we need to compare across boundaries?
 	if (TSize - ofs_mod >= len) {
 		// no
 		T key_mask = fill_bits<T>(len);
-		return ((base[ofs / sizeof(T)] >> ofs_mod) & key_mask) == (key & key_mask);
+		return ((base[ofs / TSize] >> ofs_mod) & key_mask) == (key & key_mask);
 	} 
 
 	// calc upper and lower mask
@@ -471,8 +472,8 @@ bool bit_compare(const T *base, int ofs, T key, uint32_t len)
 	T lower_key_mask = fill_bits<T>(l);
 	T upper_key_mask = fill_bits<T>(h);
 	return 
-		(((base[ofs / sizeof(T)] >> ofs_mod) & lower_key_mask) == (key & lower_key_mask)) &&
-		((base[ofs / sizeof(T) + 1] & upper_key_mask) == ((key >> l) & upper_key_mask));
+		(((base[ofs / TSize + 0] >> ofs_mod) & lower_key_mask) == (key & lower_key_mask)) &&
+		 ((base[ofs / TSize + 1] & upper_key_mask) == ((key >> l) & upper_key_mask));
 }
 
 
@@ -527,12 +528,13 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	uint32_t a, b;
 	const char *listfile = "(listfile)";
-	hashlittle2(listfile, strlen(listfile), &a, &b);
+	hashlittle2(listfile, strlen(listfile), &b, &a);
 	uint64_t h = (((uint64_t)a) << 32) | b;
 
 // mask the hash if needed (and set highest bit to 1)
-	uint64_t and_mask = het_header->dwHashEntrySize != 64 ? ((uint64_t)1 << het_header->dwHashEntrySize) - 1 : ~0;
-	h |= ((uint64_t)1 << (het_header->dwHashEntrySize - 1));
+	uint64_t and_mask = fill_bits<uint64_t>(het_header->dwHashEntrySize);
+	h |= (uint64_t)1 << (het_header->dwHashEntrySize - 1);
+		//std::limits (1u64 << (het_header->dwHashEntrySize - 1));
 
 	// het uses the highest 8 bits
 	uint8_t het_hash = (uint8_t)(h >> (het_header->dwHashEntrySize - 8));
@@ -540,8 +542,26 @@ int _tmain(int argc, _TCHAR* argv[])
 	// bet uses rest
 	uint64_t bet_hash = h & (and_mask >> 8);
 
+	uint8_t *het_hashes = het_data.get() + sizeof(HetTable);
+
+	int idx = h % het_header->dwHashTableSize;
+	bool found = false;
+	while (het_hashes[idx]) {
+		if (het_hashes[idx] == het_hash) {
+			found = true;
+			break;
+		}
+		++idx;
+	}
+
+	if (!found) {
+		// bad things..
+	}
+
+
+
 	uint32_t aa = 0x3 << 15;
-	bool k = bit_compare<uint16_t>((uint16_t *)&aa, 15, 0x3, 2);
+	bool k = bit_compare<uint16_t>((uint16_t *)&aa, 14, 0x3, 2);
 
 
 	//TMPQHetTable *het_table = (TMPQHetTable *)((byte *)het_data.get() + sizeof(HetTable));
