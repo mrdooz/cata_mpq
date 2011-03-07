@@ -4,6 +4,7 @@
 #include <celsus/celsus.hpp>
 #include <boost/scoped_array.hpp>
 #include <limits>
+#include <set>
 #include "md5.h"
 
 using namespace std;
@@ -134,19 +135,19 @@ struct BetTable : public ExtTableHeader {
 	uint32_t dwUnknown08;
 	uint32_t dwTableEntrySize;                 // Size of one table entry (in bits)
 	uint32_t dwBitIndex_FilePos;               // Bit index of the file position (within the entry record)
-	uint32_t dwBitIndex_FSize;                 // Bit index of the file size (within the entry record)
-	uint32_t dwBitIndex_CSize;                 // Bit index of the compressed size (within the entry record)
+	uint32_t dwBitIndex_FileSize;              // Bit index of the file size (within the entry record)
+	uint32_t dwBitIndex_CompressedSize;        // Bit index of the compressed size (within the entry record)
 	uint32_t dwBitIndex_FlagIndex;             // Bit index of the flag index (within the entry record)
 	uint32_t dwBitIndex_Unknown;               // Bit index of the ??? (within the entry record)
 	uint32_t dwFilePosBits;                    // Bit size of file position (in the entry record)
 	uint32_t dwFileSizeBits;                   // Bit size of file size (in the entry record)
-	uint32_t dwCmpSizeBits;                    // Bit size of compressed file size (in the entry record)
+	uint32_t dwCompressedSizeBits;             // Bit size of compressed file size (in the entry record)
 	uint32_t dwFlagsBits;                      // Bit size of flags index (in the entry record)
 	uint32_t dwUnknownBits;                    // Bit size of ??? (in the entry record)
-	uint32_t TotalNameHash2Size;               // Total size of the NameHashPart2 (in bits)
-	uint32_t dwUnknown3C;
-	uint32_t NameHash2Size;                    // Effective size of NameHashPart2 (in bits)
-	uint32_t dwUnknown44;
+	uint32_t dwTotalBetHashSize;               // Total size of the BET hash
+	uint32_t dwBetHashSizeExtra;               // Extra bits in the BET hash
+	uint32_t dwBetHashSize;                    // Effective size of BET hash (in bits)
+	uint32_t dwBetHashArraySize;               // Size of BET hashes array, in bytes
 	uint32_t dwFlagCount;                      // Number of flags in the following array
 };
 #pragma pack(pop)
@@ -453,6 +454,23 @@ T fill_bits(int n)
 }
 
 template <typename T>
+T packed_bits(const void *base, uint64_t ofs, uint32_t len)
+{
+	uint32_t t_size = 8 * sizeof(T);
+	uint32_t start_ofs = ofs % 8;
+	const T *snapped = (const T *)((const uint8_t *)base + ofs / 8);
+	T start_mask = ~fill_bits<T>(start_ofs);
+	T end_mask = fill_bits<T>((start_ofs + len)% t_size);
+
+	// does the block stradle 2 memory locations?
+	if (start_ofs + len <= t_size) {
+		return (*snapped & (start_mask & end_mask)) >> start_ofs;
+	}
+
+	return (snapped[0] & start_mask) >> start_ofs | (snapped[1] & end_mask) << (t_size - start_ofs);
+}
+
+template <typename T>
 bool bit_compare(const T *base, int ofs, T key, uint32_t len)
 {
 	// look for key of length len bits, starting at base + ofs (ofs is in bits)
@@ -463,6 +481,8 @@ bool bit_compare(const T *base, int ofs, T key, uint32_t len)
 	if (TSize - ofs_mod >= len) {
 		// no
 		T key_mask = fill_bits<T>(len);
+		T tmp = base[ofs / TSize];
+		T tmp2 = base[ofs / TSize] >> ofs_mod;
 		return ((base[ofs / TSize] >> ofs_mod) & key_mask) == (key & key_mask);
 	} 
 
@@ -476,6 +496,28 @@ bool bit_compare(const T *base, int ofs, T key, uint32_t len)
 		 ((base[ofs / TSize + 1] & upper_key_mask) == ((key >> l) & upper_key_mask));
 }
 
+void verify_file_table(const BetTable *bet_header, const uint8_t *bet_file_table)
+{
+	for (DWORD i = 0; i < bet_header->dwFileCount; ++i) {
+		uint64_t file_pos = packed_bits<uint64_t>(bet_file_table, i * bet_header->dwTableEntrySize + bet_header->dwBitIndex_FilePos, bet_header->dwFilePosBits);
+		uint64_t file_size = packed_bits<uint64_t>(bet_file_table, i * bet_header->dwTableEntrySize + bet_header->dwBitIndex_FileSize, bet_header->dwFileSizeBits);
+		uint64_t file_csize = packed_bits<uint64_t>(bet_file_table, i * bet_header->dwTableEntrySize + bet_header->dwBitIndex_CompressedSize, bet_header->dwCompressedSizeBits);
+		uint64_t file_flags = packed_bits<uint64_t>(bet_file_table, i * bet_header->dwTableEntrySize + bet_header->dwBitIndex_FlagIndex, bet_header->dwFlagsBits);
+		uint64_t file_unknown = packed_bits<uint64_t>(bet_file_table, i * bet_header->dwTableEntrySize + bet_header->dwBitIndex_Unknown, bet_header->dwUnknownBits);
+		int a = 10;
+	}
+}
+
+void verify_file_idx(const HetTable *het_header, uint8_t *file_indices)
+{
+	set<uint32_t> files;
+	for (size_t i = 0; i < het_header->dwHashTableSize; ++i) {
+		uint32_t file_idx = packed_bits<uint32_t>(file_indices, i * het_header->dwTotalIndexSize, het_header->dwIndexSize);
+		files.insert(file_idx);
+		int aa = 0;
+	}
+
+}
 
 int _tmain(int argc, _TCHAR* argv[])
 {
@@ -526,32 +568,69 @@ int _tmain(int argc, _TCHAR* argv[])
 	if (het_header->dwDataSize != het_header->dwTableSize)
 		return 1;
 
-	uint32_t a, b;
+	// set up pointers to the variable length data after the header
+	uint8_t *het_hashes = het_data.get() + sizeof(HetTable);
+	uint8_t *file_indices = het_hashes + het_header->dwHashTableSize;
+
+	// read the bet table
+	if (!header.bet_table_offset64)
+		return 1;
+
+	scoped_array<byte> bet_data(new byte[(uint32_t)header.bet_table_size64]);
+	f.read_ofs(bet_data.get(), header.bet_table_offset64, (uint32_t)header.bet_table_size64, NULL);
+	if (!verify_md5(bet_data.get(), (int)header.bet_table_size64, header.md5_bet_table))
+		return 1;
+
+	const BetTable *bet_header = (BetTable *)bet_data.get();
+	decrypt_data(bet_data.get() + sizeof(ExtendedTableHeader), bet_header->dwDataSize, hash_string("(block table)", HashTypeBlockTable));
+	if (bet_header->dwDataSize != bet_header->dwTableSize)
+		return 1;
+	DWORD *bet_flags = (DWORD *)(bet_data.get() + sizeof(BetTable));
+	uint8_t *bet_file_table = (uint8_t *)bet_flags + bet_header->dwFlagCount * sizeof(DWORD);
+	uint8_t *bet_hashes = bet_file_table + (bet_header->dwTableEntrySize * bet_header->dwFileCount + 7) / 8;
+
+	uint32_t c = 2, b = 1;
 	const char *listfile = "(listfile)";
-	hashlittle2(listfile, strlen(listfile), &b, &a);
-	uint64_t h = (((uint64_t)a) << 32) | b;
+	hashlittle2(listfile, strlen(listfile), &c, &b);
+	uint64_t h = c + (((uint64_t)b) << 32);
 
 // mask the hash if needed (and set highest bit to 1)
 	uint64_t and_mask = fill_bits<uint64_t>(het_header->dwHashEntrySize);
+	h &= and_mask;
 	h |= (uint64_t)1 << (het_header->dwHashEntrySize - 1);
-		//std::limits (1u64 << (het_header->dwHashEntrySize - 1));
 
-	// het uses the highest 8 bits
+	// het uses the highest 8 bits, bet uses rest
 	uint8_t het_hash = (uint8_t)(h >> (het_header->dwHashEntrySize - 8));
+	uint64_t bet_hash = h & fill_bits<uint64_t>(het_header->dwHashEntrySize - 8);
 
-	// bet uses rest
-	uint64_t bet_hash = h & (and_mask >> 8);
+	verify_file_idx(het_header, file_indices);
+	verify_file_table(bet_header, bet_file_table);
 
-	uint8_t *het_hashes = het_data.get() + sizeof(HetTable);
-
-	int idx = h % het_header->dwHashTableSize;
-	bool found = false;
-	while (het_hashes[idx]) {
-		if (het_hashes[idx] == het_hash) {
-			found = true;
-			break;
+	for (uint32_t i = 0 ; i < het_header->dwFileCount; ++i) {
+		uint64_t bb = packed_bits<uint64_t>(bet_hashes, i * bet_header->dwTotalBetHashSize, bet_header->dwBetHashSize);
+		if (bb == bet_hash) {
+			int a = 10;
 		}
-		++idx;
+	}
+
+	int org_idx, idx;
+	org_idx = idx = h % het_header->dwHashTableSize;
+	bool found = false;
+	while (true) {
+		byte h = het_hashes[idx];
+		if (h == het_hash) {
+			// get the file index
+			uint32_t file_idx = packed_bits<uint32_t>(file_indices, idx * het_header->dwTotalIndexSize, het_header->dwIndexSize);
+			uint64_t bb = packed_bits<uint64_t>(bet_hashes, file_idx * bet_header->dwTotalBetHashSize, bet_header->dwBetHashSize);
+			if (bb == bet_hash) {
+				found = true;
+				break;
+			}
+		}
+
+		idx = (idx + 1) % het_header->dwHashTableSize;
+		if (idx == org_idx)
+			break;
 	}
 
 	if (!found) {
@@ -559,53 +638,6 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 
 
-
-	uint32_t aa = 0x3 << 15;
-	bool k = bit_compare<uint16_t>((uint16_t *)&aa, 14, 0x3, 2);
-
-
-	//TMPQHetTable *het_table = (TMPQHetTable *)((byte *)het_data.get() + sizeof(HetTable));
-
-
-	// read the bet table
-
-	uint32_t lf_hashes[] = {
-		hash_string("(listfile)", 0),
-		hash_string("(listfile)", 1),
-		hash_string("(listfile)", 2),
-		hash_string("(listfile)", 3),
-		hash_string("(listfile)", 4),
-		hash_string("(listfile)", 5),
-	};
-
-	for (int i = 0; i < header.hash_table_entries; ++i) {
-		HashTableEntry *cur = &hash_table[i];
-		uint32_t a = hash_table[i].hash_a;
-		uint32_t b = hash_table[i].hash_b;
-		for (int j = 0; j < ELEMS_IN_ARRAY(lf_hashes); ++j) {
-			if (lf_hashes[j] == a || lf_hashes[j] == b) {
-				int bb = 10;
-			}
-		}
-	}
-
-
-
-
-	int cBufferSize = 16 * 1024;
-	void *data = new byte[cBufferSize];
-
-	if (header.het_table_offset64) {
-		ExtendedTableHeader ext_header;
-		f.read_ofs((void *)&ext_header, header.het_table_offset64, sizeof(ext_header), NULL);
-		void *buf = new byte[ext_header.data_size];
-		f.read_ofs(buf, header.het_table_offset64 + sizeof(ext_header), ext_header.data_size, NULL);
-		int a = 10;
-	}
-
-	read_block_table(&header, data);
-
-	delete [] data;
 
 
 	return 0;
