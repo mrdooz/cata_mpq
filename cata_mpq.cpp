@@ -91,17 +91,41 @@ struct BlockTableEntry {
 	int32_t file_size;
 	int32_t flags;
 };
-
+/*
 enum BlockTableFlags {
-	kBtFlagsFile           = 0x80000000,
-	kBtFlagsChecksum       = 0x04000000,
-	kBtFlagsDeletionmarker = 0x20000000,
-	kBtFlagsSingleUnit     = 0x10000000,
-	kBtFlagsAdjustedKey    = 0x00020000,
-	kBtFlagsEncrypted      = 0x00010000,
-	kBtFlagsCompressed     = 0x00000200,
 	kBtFlagsImploded       = 0x00000100,
+	kBtFlagsCompressed     = 0x00000200,
+	kBtFlagsEncrypted      = 0x00010000,
+	kBtFlagsAdjustedKey    = 0x00020000,
+	kBtFlagsChecksum       = 0x04000000,
+	kBtFlagsSingleUnit     = 0x10000000,
+	kBtFlagsDeletionmarker = 0x20000000,
+	kBtFlagsFile           = 0x80000000,
 };
+*/
+#define MPQ_FILE_IMPLODE         0x00000100 // Implode method (By PKWARE Data Compression Library)
+#define MPQ_FILE_COMPRESS        0x00000200 // Compress methods (By multiple methods)
+#define MPQ_FILE_COMPRESSED      0x0000FF00 // File is compressed
+#define MPQ_FILE_ENCRYPTED       0x00010000 // Indicates whether file is encrypted 
+#define MPQ_FILE_FIX_KEY         0x00020000 // File decryption key has to be fixed
+#define MPQ_FILE_PATCH_FILE      0x00100000 // The file is a patch file. Raw file data begin with TPatchInfo structure
+#define MPQ_FILE_SINGLE_UNIT     0x01000000 // File is stored as a single unit, rather than split into sectors (Thx, Quantam)
+#define MPQ_FILE_DELETE_MARKER   0x02000000 // File is a deletion marker, indicating that the file no longer exists.
+// The file is only 1 byte long and its name is a hash
+#define MPQ_FILE_SECTOR_CRC      0x04000000 // File has checksums for each sector.
+// Ignored if file is not compressed or imploded.
+#define MPQ_FILE_EXISTS          0x80000000 // Set if file exists, reset when the file was deleted
+#define MPQ_FILE_REPLACEEXISTING 0x80000000 // Replace when the file exist (SFileAddFile)
+
+
+// Compression types for multiple compressions
+#define MPQ_COMPRESSION_HUFFMANN       0x01 // Huffmann compression (used on WAVE files only)
+#define MPQ_COMPRESSION_ZLIB           0x02 // ZLIB compression
+#define MPQ_COMPRESSION_PKWARE         0x08 // PKWARE DCL compression
+#define MPQ_COMPRESSION_BZIP2          0x10 // BZIP2 compression (added in Warcraft III)
+#define MPQ_COMPRESSION_SPARSE         0x20 // Sparse compression (added in Starcraft 2)
+#define MPQ_COMPRESSION_ADPCM_MONO     0x40 // IMA ADPCM compression (mono)
+#define MPQ_COMPRESSION_ADPCM_STEREO   0x80 // IMA ADPCM compression (stereo)
 
 struct HashTableEntry {
 	uint32_t hash_a;  // file path hash, using method a
@@ -419,7 +443,7 @@ struct MpqLoader {
 	MpqLoader();
 	bool load(const char *filename);
 	int32_t find_file(const char *filename);
-	void load_file(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown);
+	bool load_file(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown);
 
 //private:
 	// Different types of hashes to make with hash_string
@@ -442,6 +466,7 @@ struct MpqLoader {
 	uint8 *_bet_hashes;
 	uint8 *_het_hashes;
 	uint8 *_bet_file_table;
+	uint32 *_bet_file_flags;
 	scoped_array<byte> _het_data;
 	scoped_array<byte> _bet_data;
 	scoped_array<BlockTableEntry> _block_table;
@@ -458,6 +483,7 @@ MpqLoader::MpqLoader()
 	, _bet_hashes(nullptr)
 	, _het_hashes(nullptr)
 	, _bet_file_table(nullptr)
+	, _bet_file_flags(nullptr)
 {
 	init_crypt_table();
 }
@@ -497,13 +523,17 @@ void MpqLoader::init_crypt_table()
 	}
 }
 
-void MpqLoader::load_file(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown)
+bool MpqLoader::load_file(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown)
 {
 	*file_pos = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_FilePos, _bet_header->dwFilePosBits);
 	*file_size = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_FileSize, _bet_header->dwFileSizeBits);
 	*compressed_size = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_CompressedSize, _bet_header->dwCompressedSizeBits);
-	*flags = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_FlagIndex, _bet_header->dwFlagsBits);
+	uint32 flag_index = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_FlagIndex, _bet_header->dwFlagsBits);
+	if (flag_index >= _bet_header->dwFlagCount)
+		return false;
+	*flags = _bet_file_flags[flag_index];
 	*unknown = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_Unknown, _bet_header->dwUnknownBits);
+	return true;
 }
 
 int32_t MpqLoader::find_file(const char *filename)
@@ -626,8 +656,8 @@ bool MpqLoader::load(const char *filename)
 	decrypt_data(_bet_data.get() + sizeof(ExtendedTableHeader), _bet_header->dwDataSize, hash_string("(block table)", HashTypeBlockTable));
 	if (_bet_header->dwDataSize != _bet_header->dwTableSize)
 		return 1;
-	DWORD *bet_flags = (DWORD *)(_bet_data.get() + sizeof(BetTable));
-	_bet_file_table = (uint8_t *)bet_flags + _bet_header->dwFlagCount * sizeof(DWORD);
+	_bet_file_flags = (uint32 *)(_bet_data.get() + sizeof(BetTable));
+	_bet_file_table = (uint8_t *)_bet_file_flags + _bet_header->dwFlagCount * sizeof(DWORD);
 	_bet_hashes = _bet_file_table + (_bet_header->dwTableEntrySize * _bet_header->dwFileCount + 7) / 8;
 
 	return true;
@@ -663,13 +693,48 @@ int _tmain(int argc, _TCHAR* argv[])
 	uint32 filesize, filepos, compressed_size, flags, unknown;
 	loader.load_file(idx, &filepos, &filesize, &compressed_size, &flags, &unknown);
 
-	scoped_array<byte> tmp(new byte[compressed_size]);
-	loader.f.read_ofs(tmp.get(), filepos, compressed_size, NULL);
+	if (flags & MPQ_FILE_COMPRESSED) {
+		scoped_array<byte> tmp(new byte[compressed_size]);
+		loader.f.read_ofs(tmp.get(), filepos, compressed_size, NULL);
 
-	scoped_array<byte> exploded(new byte[filesize]);
-	TDcmpStruct buf;
-	ZeroMemory(&buf, sizeof(buf));
-	explode(read_buf, write_buf, (char *)&buf, (void *)tmp.get());
+		if (flags & MPQ_FILE_IMPLODE) {
+
+			scoped_array<byte> exploded(new byte[filesize]);
+			TDcmpStruct buf;
+			ZeroMemory(&buf, sizeof(buf));
+			explode(read_buf, write_buf, (char *)&buf, (void *)tmp.get());
+		}
+
+		if (flags & MPQ_FILE_COMPRESS) {
+			// first byte is the compression mask
+			uint8 compression_mask = tmp[0];
+			if (compression_mask & MPQ_COMPRESSION_HUFFMANN) {
+				printf("MPQ_COMPRESSION_HUFFMANN\n");
+			}
+			if (compression_mask & MPQ_COMPRESSION_ZLIB) {
+				printf("MPQ_COMPRESSION_ZLIB\n");
+			}
+			if (compression_mask & MPQ_COMPRESSION_PKWARE) {
+				printf("MPQ_COMPRESSION_PKWARE\n");
+			}
+			if (compression_mask & MPQ_COMPRESSION_BZIP2) {
+				printf("MPQ_COMPRESSION_BZIP2\n");
+			}
+			if (compression_mask & MPQ_COMPRESSION_SPARSE) {
+				printf("MPQ_COMPRESSION_SPARSE\n");
+			}
+			if (compression_mask & MPQ_COMPRESSION_ADPCM_MONO) {
+				printf("MPQ_COMPRESSION_ADPCM_MONO\n");
+			}
+			if (compression_mask & MPQ_COMPRESSION_ADPCM_STEREO) {
+				printf("MPQ_COMPRESSION_ADPCM_STEREO\n");
+			}
+			
+			int a = 10;
+
+		}
+
+	}
 
 
 	return 0;
