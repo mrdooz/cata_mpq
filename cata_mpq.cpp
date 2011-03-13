@@ -5,6 +5,8 @@
 #include <boost/scoped_array.hpp>
 #include <limits>
 #include <set>
+#include <bzlib.h>
+#include <zlib.h>
 #include "md5.h"
 #include "pklib.h"
 
@@ -442,8 +444,11 @@ void verify_file_idx(const HetTable *het_header, uint8_t *file_indices)
 struct MpqLoader {
 	MpqLoader();
 	bool load(const char *filename);
+
+	bool load_file(const char *filename, uint8 **data, uint64 *len);
+
 	int32_t find_file(const char *filename);
-	bool load_file(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown);
+	bool load_file_data(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown);
 
 //private:
 	// Different types of hashes to make with hash_string
@@ -460,6 +465,7 @@ struct MpqLoader {
 
 	FileReader f;
 
+	MpqHeader _header;
 	HetTable *_het_header;
 	BetTable *_bet_header;
 	uint8 *_file_indices;
@@ -523,7 +529,96 @@ void MpqLoader::init_crypt_table()
 	}
 }
 
-bool MpqLoader::load_file(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown)
+bool MpqLoader::load_file(const char *filename, uint8 **data, uint64 *len)
+{
+	int32 idx = find_file(filename);
+	if (idx == -1)
+		return false;
+
+	uint32 filepos, file_size, compressed_size, flags, unknown;
+	if (!load_file_data(idx, &filepos, &file_size, &compressed_size, &flags, &unknown))
+		return false;
+
+	if (flags & MPQ_FILE_COMPRESSED) {
+
+		// read compressed data
+		scoped_array<byte> compressed(new byte[compressed_size]);
+		f.read_ofs(compressed.get(), filepos, compressed_size, NULL);
+
+		// allocate memory for the uncompressed data
+		uint8 *buf = new byte[file_size];
+
+		if (flags & MPQ_FILE_IMPLODE) {
+
+			// TODO: fix read_buf/write_buf
+/*
+			scoped_array<byte> exploded(new byte[filesize]);
+			TDcmpStruct buf;
+			ZeroMemory(&buf, sizeof(buf));
+			explode(read_buf, write_buf, (char *)&buf, (void *)tmp.get());
+*/
+		}
+
+		if (flags & MPQ_FILE_COMPRESS) {
+
+			vector<uint32> ofs;
+			const int num_blocks = file_size / (512 * (1 << _header.sector_size_shift));
+			for (int i = 0; i < num_blocks+1; ++i)
+				ofs.push_back(((uint32*)compressed.get())[i]);
+
+			// Add the compressed size to be able to compute block size easily (cur_ofs[i+1] - cur_ofs[i])
+			ofs.push_back(compressed_size);
+
+			uint32 decomp_ofs = 0;  // offset into the decompressed data
+			for (size_t i = 0, e = ofs.size()-1; i < e; ++i) {
+
+				byte *cur = &compressed[ofs[i]];
+				// first byte is the compression mask
+				uint8 compression_mask = *cur++;
+
+				if (compression_mask & MPQ_COMPRESSION_HUFFMANN) {
+					printf("MPQ_COMPRESSION_HUFFMANN\n");
+				}
+				if (compression_mask & MPQ_COMPRESSION_ZLIB) {
+					uLongf dst_size = file_size;
+					uLongf src_size = ofs[i+1] - ofs[i] - 1;
+					uncompress(&buf[decomp_ofs], &dst_size,  &compressed[ofs[i]+1], src_size);
+					decomp_ofs += dst_size;
+					printf("MPQ_COMPRESSION_ZLIB\n");
+				}
+				if (compression_mask & MPQ_COMPRESSION_PKWARE) {
+					printf("MPQ_COMPRESSION_PKWARE\n");
+				}
+				if (compression_mask & MPQ_COMPRESSION_BZIP2) {
+/*
+					scoped_array<char> dst(new char[filesize]);
+					uint32 s = filesize;
+					BZ2_bzBuffToBuffDecompress(dst.get(), &s, (char *)(tmp.get() + 1), compressed_size-1, 0, 0);
+*/
+					printf("MPQ_COMPRESSION_BZIP2\n");
+				}
+				if (compression_mask & MPQ_COMPRESSION_SPARSE) {
+					printf("MPQ_COMPRESSION_SPARSE\n");
+				}
+				if (compression_mask & MPQ_COMPRESSION_ADPCM_MONO) {
+					printf("MPQ_COMPRESSION_ADPCM_MONO\n");
+				}
+				if (compression_mask & MPQ_COMPRESSION_ADPCM_STEREO) {
+					printf("MPQ_COMPRESSION_ADPCM_STEREO\n");
+				}
+
+			}
+		}
+
+		*data = buf;
+		*len = file_size;
+	}
+
+	return true;
+
+}
+
+bool MpqLoader::load_file_data(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown)
 {
 	*file_pos = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_FilePos, _bet_header->dwFilePosBits);
 	*file_size = packed_bits<uint32>(_bet_file_table, _bet_header->dwTableEntrySize * idx + _bet_header->dwBitIndex_FileSize, _bet_header->dwFileSizeBits);
@@ -599,39 +694,38 @@ bool MpqLoader::load(const char *filename)
 	if (!f.open(filename))
 		return false;
 
-	MpqHeader header;
-	if (!find_header(f, &header))
+	if (!find_header(f, &_header))
 		return false;
 
-	if (header.header_size != sizeof(MpqHeader))
+	if (_header.header_size != sizeof(MpqHeader))
 		return false;
 
 	// only support cataclysm
-	if (header.format_version != 3)
+	if (_header.format_version != 3)
 		return false;
 
 	// read the block table
-	int bt_size = header.block_table_entries * sizeof(BlockTableEntry);
+	int bt_size = _header.block_table_entries * sizeof(BlockTableEntry);
 
-	_block_table.reset(new BlockTableEntry[header.block_table_entries]);
-	f.read_ofs(_block_table.get(), ((uint64_t)header.block_table_offset_high << 32) + header.block_table_offset, bt_size, NULL);
+	_block_table.reset(new BlockTableEntry[_header.block_table_entries]);
+	f.read_ofs(_block_table.get(), ((uint64_t)_header.block_table_offset_high << 32) + _header.block_table_offset, bt_size, NULL);
 	uint32_t bt_key = hash_string("(block table)", HashTypeBlockTable);
 	decrypt_data(_block_table.get(), bt_size/4, bt_key);
 
 	// read the hash table
-	int ht_size = header.hash_table_entries * sizeof(HashTableEntry);
-	_hash_table.reset(new HashTableEntry[header.hash_table_entries]);
-	f.read_ofs(_hash_table.get(), ((uint64_t)header.hash_table_offset_high << 32) + header.hash_table_offset, ht_size, NULL);
+	int ht_size = _header.hash_table_entries * sizeof(HashTableEntry);
+	_hash_table.reset(new HashTableEntry[_header.hash_table_entries]);
+	f.read_ofs(_hash_table.get(), ((uint64_t)_header.hash_table_offset_high << 32) + _header.hash_table_offset, ht_size, NULL);
 	uint32_t ht_key = hash_string("(hash table)", HashTypeBlockTable);
 	decrypt_data(_hash_table.get(), ht_size/4, ht_key);
 
 	// read the het table
-	if (!header.het_table_offset64)
+	if (!_header.het_table_offset64)
 		return false;
 
-	_het_data.reset(new byte[(uint32_t)header.het_table_size64]);
-	f.read_ofs(_het_data.get(), header.het_table_offset64, (uint32_t)header.het_table_size64, NULL);
-	if (!verify_md5(_het_data.get(), (int)header.het_table_size64, header.md5_het_table))
+	_het_data.reset(new byte[(uint32_t)_header.het_table_size64]);
+	f.read_ofs(_het_data.get(), _header.het_table_offset64, (uint32_t)_header.het_table_size64, NULL);
+	if (!verify_md5(_het_data.get(), (int)_header.het_table_size64, _header.md5_het_table))
 		return false;
 
 	_het_header = (HetTable *)_het_data.get();
@@ -644,12 +738,12 @@ bool MpqLoader::load(const char *filename)
 	_file_indices = _het_hashes + _het_header->dwHashTableSize;
 
 	// read the bet table
-	if (!header.bet_table_offset64)
+	if (!_header.bet_table_offset64)
 		return false;
 
-	_bet_data.reset(new byte[(uint32_t)header.bet_table_size64]);
-	f.read_ofs(_bet_data.get(), header.bet_table_offset64, (uint32_t)header.bet_table_size64, NULL);
-	if (!verify_md5(_bet_data.get(), (int)header.bet_table_size64, header.md5_bet_table))
+	_bet_data.reset(new byte[(uint32_t)_header.bet_table_size64]);
+	f.read_ofs(_bet_data.get(), _header.bet_table_offset64, (uint32_t)_header.bet_table_size64, NULL);
+	if (!verify_md5(_bet_data.get(), (int)_header.bet_table_size64, _header.md5_bet_table))
 		return false;
 
 	_bet_header = (BetTable *)_bet_data.get();
@@ -686,56 +780,15 @@ int _tmain(int argc, _TCHAR* argv[])
 	if (!loader.load("expansion3.mpq"))
 		return 1;
 
-	int idx = loader.find_file("(listfile)");
-	if (idx == -1)
+	uint8 *buf;
+	uint64 len;
+
+	if (!loader.load_file("(listfile)", &buf, &len))
 		return 1;
 
-	uint32 filesize, filepos, compressed_size, flags, unknown;
-	loader.load_file(idx, &filepos, &filesize, &compressed_size, &flags, &unknown);
-
-	if (flags & MPQ_FILE_COMPRESSED) {
-		scoped_array<byte> tmp(new byte[compressed_size]);
-		loader.f.read_ofs(tmp.get(), filepos, compressed_size, NULL);
-
-		if (flags & MPQ_FILE_IMPLODE) {
-
-			scoped_array<byte> exploded(new byte[filesize]);
-			TDcmpStruct buf;
-			ZeroMemory(&buf, sizeof(buf));
-			explode(read_buf, write_buf, (char *)&buf, (void *)tmp.get());
-		}
-
-		if (flags & MPQ_FILE_COMPRESS) {
-			// first byte is the compression mask
-			uint8 compression_mask = tmp[0];
-			if (compression_mask & MPQ_COMPRESSION_HUFFMANN) {
-				printf("MPQ_COMPRESSION_HUFFMANN\n");
-			}
-			if (compression_mask & MPQ_COMPRESSION_ZLIB) {
-				printf("MPQ_COMPRESSION_ZLIB\n");
-			}
-			if (compression_mask & MPQ_COMPRESSION_PKWARE) {
-				printf("MPQ_COMPRESSION_PKWARE\n");
-			}
-			if (compression_mask & MPQ_COMPRESSION_BZIP2) {
-				printf("MPQ_COMPRESSION_BZIP2\n");
-			}
-			if (compression_mask & MPQ_COMPRESSION_SPARSE) {
-				printf("MPQ_COMPRESSION_SPARSE\n");
-			}
-			if (compression_mask & MPQ_COMPRESSION_ADPCM_MONO) {
-				printf("MPQ_COMPRESSION_ADPCM_MONO\n");
-			}
-			if (compression_mask & MPQ_COMPRESSION_ADPCM_STEREO) {
-				printf("MPQ_COMPRESSION_ADPCM_STEREO\n");
-			}
-			
-			int a = 10;
-
-		}
-
-	}
-
+	FILE *f = fopen("listfile.txt", "wt");
+	fwrite(buf, 1, len, f);
+	fclose(f);
 
 	return 0;
 }
