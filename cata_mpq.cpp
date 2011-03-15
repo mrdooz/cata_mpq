@@ -7,6 +7,7 @@
 #include <set>
 #include <bzlib.h>
 #include <zlib.h>
+#include <direct.h>
 #include "md5.h"
 #include "pklib.h"
 
@@ -444,8 +445,8 @@ void verify_file_idx(const HetTable *het_header, uint8_t *file_indices)
 struct MpqLoader {
 	MpqLoader();
 	bool load(const char *filename);
-
 	bool load_file(const char *filename, uint8 **data, uint64 *len);
+	bool extract(const char *filename);
 
 	int32_t find_file(const char *filename);
 	bool load_file_data(int32 idx, uint32 *file_pos, uint32 *file_size, uint32 *compressed_size, uint32 *flags, uint32 *unknown);
@@ -631,8 +632,11 @@ bool MpqLoader::load_file_data(int32 idx, uint32 *file_pos, uint32 *file_size, u
 	return true;
 }
 
-int32_t MpqLoader::find_file(const char *filename)
+int32_t MpqLoader::find_file(const char *filename_org)
 {
+	char *filename = strdup(filename_org);
+	strlwr(filename);
+
 	uint32_t c = 2, b = 1;
 	hashlittle2(filename, strlen(filename), &c, &b);
 	uint64_t h = c + (((uint64_t)b) << 32);
@@ -656,6 +660,7 @@ int32_t MpqLoader::find_file(const char *filename)
 			uint32_t file_idx = packed_bits<uint32_t>(_file_indices, idx * _het_header->dwTotalIndexSize, _het_header->dwIndexSize);
 			uint64_t bb = packed_bits<uint64_t>(_bet_hashes, file_idx * _bet_header->dwTotalBetHashSize, _bet_header->dwBetHashSize);
 			if (bb == bet_hash) {
+				free(filename);
 				return file_idx;
 			}
 		}
@@ -665,6 +670,7 @@ int32_t MpqLoader::find_file(const char *filename)
 			break;
 	}
 
+	free(filename);
 	return -1;
 }
 
@@ -774,21 +780,155 @@ extern "C"
 
 };
 
+void intrusive_split(char *str, char sep, vector<const char *> *splits)
+{
+	char *last = str;
+	char *p = str;
+	while (*last && (p = strchr(last, sep))) {
+		*p = '\0';
+		splits->push_back(last);
+		last = ++p;
+	}
+
+	if (*last)
+		splits->push_back(last);
+}
+
+bool MpqLoader::extract(const char *filename)
+{
+
+	uint8 *buf;
+	uint64 len;
+
+	if (!load_file(filename, &buf, &len))
+		return false;
+
+	string2 ff(filename);
+	vector<const char *> splits;
+	intrusive_split(ff.str(), '\\', &splits);
+
+	char cwd[MAX_PATH];
+	_getcwd(cwd, sizeof(cwd));
+
+	for (size_t i = 0; i < splits.size() - 1; ++i) {
+		_mkdir(splits[i]);
+		_chdir(splits[i]);
+	}
+
+	_chdir(cwd);
+
+	FILE *f = fopen(filename, "wb");
+	fwrite(buf, 1, (size_t)len, f);
+	fclose(f);
+
+	return true;
+}
+
+namespace adt {
+
+struct ChunkHeader {
+	uint32 tag;
+	uint32 data_size;
+};
+
+struct MVER : public ChunkHeader {
+	uint32 version;
+};
+
+struct MHDR : public ChunkHeader {
+	uint32 flags;
+};
+
+struct MCIN : public ChunkHeader {
+	struct Entry {
+		void *mcnk;
+		uint32 size;
+		uint32 flags;
+		uint32 async_id;
+	} entries[16*16];
+};
+
+struct MTEX : public ChunkHeader {
+	const char *filenames;
+};
+
+#define MK_TAG(a, b, c, d) (a) << 24 | (b) << 16 | (c) << 8 | (d)
+
+	void adt_parse(const uint8 *buf, int64 len)
+	{
+		int64 ofs = 0;
+		while (ofs < len) {
+			ChunkHeader header = *(ChunkHeader *)&buf[ofs];
+
+			switch (header.tag) {
+			case MK_TAG('M', 'V', 'E', 'R'):
+				break;
+
+			case MK_TAG('M', 'H', 'D', 'R'):
+				break;
+
+			case MK_TAG('M', 'C', 'I', 'N'):
+				break;
+
+			case MK_TAG('M', 'T', 'E', 'X'):
+				{
+					MTEX *mtex = (MTEX *)(buf + ofs + sizeof(ChunkHeader));
+					int a = 10;
+				}
+				break;
+
+			case MK_TAG('M', 'M', 'D', 'X'):
+				break;
+
+			case MK_TAG('M', 'M', 'I', 'D'):
+				break;
+
+			case MK_TAG('M', 'W', 'M', 'O'):
+				break;
+
+			case MK_TAG('M', 'W', 'I', 'D'):
+				break;
+
+			case MK_TAG('M', 'D', 'D', 'F'):
+				break;
+
+			case MK_TAG('M', 'O', 'D', 'F'):
+				break;
+
+			case MK_TAG('M', 'H', '2', 'O'):
+				break;
+
+			case MK_TAG('M', 'C', 'N', 'K'):
+				{
+					int a = 10;
+				}
+				break;
+
+
+			}
+
+			ofs += sizeof(ChunkHeader) + header.data_size;
+
+		}
+
+	}
+
+}
+
 int _tmain(int argc, _TCHAR* argv[])
 {
 	MpqLoader loader;
 	if (!loader.load("expansion3.mpq"))
 		return 1;
 
-	uint8 *buf;
-	uint64 len;
+	loader.extract("World\\maps\\AbyssalMaw\\AbyssalMaw_29_29.adt");
 
-	if (!loader.load_file("(listfile)", &buf, &len))
+	uint8 *data;
+	uint64 len;
+	if (!loader.load_file("World\\maps\\AbyssalMaw\\AbyssalMaw_29_29.adt", &data, &len))
 		return 1;
 
-	FILE *f = fopen("listfile.txt", "wt");
-	fwrite(buf, 1, len, f);
-	fclose(f);
+	adt::adt_parse(data, len);
 
 	return 0;
 }
