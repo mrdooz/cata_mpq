@@ -827,16 +827,15 @@ bool MpqLoader::extract(const char *filename)
 namespace adt {
 
 struct ChunkHeader {
-	uint32 tag;
+	union {
+		uint32 tag;
+		char ctag[4];
+	};
 	uint32 data_size;
 };
 
 struct MVER : public ChunkHeader {
 	uint32 version;
-};
-
-struct MHDR : public ChunkHeader {
-	uint32 flags;
 };
 
 struct MCIN : public ChunkHeader {
@@ -852,6 +851,99 @@ struct MTEX : public ChunkHeader {
 	const char *filenames;
 };
 
+struct MMDX : public ChunkHeader {
+
+};
+
+struct MMID : public ChunkHeader {
+
+};
+
+struct MWMO : public ChunkHeader {
+	const char *filenames;
+};
+
+struct MWID : public ChunkHeader {
+
+};
+
+struct MDDF : public ChunkHeader {
+
+};
+
+struct MODF : public ChunkHeader {
+
+};
+
+struct MFBO : public ChunkHeader {
+
+};
+
+struct MH2O : public ChunkHeader {
+
+};
+
+struct MTFX : public ChunkHeader {
+
+};
+
+
+struct MHDR : public ChunkHeader {
+	uint32 flags;
+	MCIN *mcin;
+	MTEX *mtex;
+	MMDX *mmdx;
+	MMID *mmid;
+	MWMO *mwmo;
+	MWID *mwid;
+	MDDF *mddf;
+	MODF *modf;
+	MFBO *mfbo;
+	MH2O *mh2o;
+	MTFX *mtfx;
+	uint32 unused[4];
+};
+
+struct MCVT : public ChunkHeader {
+
+};
+
+struct MCNR : public ChunkHeader {
+
+};
+
+struct MCLY : public ChunkHeader {
+
+};
+
+struct MCRF : public ChunkHeader {
+
+};
+
+struct MCAL : public ChunkHeader {
+
+};
+
+struct MCSH : public ChunkHeader {
+
+};
+
+struct MCNK : public ChunkHeader {
+	uint32 flags;
+	uint32 index_x;
+	uint32 index_y;
+	uint32 layers;
+	uint32 doodad_refs;
+	MCVT *ptr_height;  // these are stored as offsets in the file, but we adjust them load time
+	MCNR *ptr_normal;
+	MCLY *ptr_layer;
+	MCRF *ptr_refs;
+	MCAL *ptr_alpha;
+	uint32 size_alpha;
+	MCSH *ptr_shadow;
+	uint32 size_shadow;
+};
+
 #define MK_TAG(a, b, c, d) (a) << 24 | (b) << 16 | (c) << 8 | (d)
 
 	void adt_parse(const uint8 *buf, int64 len)
@@ -862,9 +954,17 @@ struct MTEX : public ChunkHeader {
 
 			switch (header.tag) {
 			case MK_TAG('M', 'V', 'E', 'R'):
+				{
+					MVER *mver = (MVER *)&buf[ofs];
+					int a = 10;
+				}
 				break;
 
 			case MK_TAG('M', 'H', 'D', 'R'):
+				{
+					MHDR *mhdr = (MHDR *)&buf[ofs];
+					int a = 10;
+				}
 				break;
 
 			case MK_TAG('M', 'C', 'I', 'N'):
@@ -872,18 +972,26 @@ struct MTEX : public ChunkHeader {
 
 			case MK_TAG('M', 'T', 'E', 'X'):
 				{
-					MTEX *mtex = (MTEX *)(buf + ofs + sizeof(ChunkHeader));
+					MTEX *mtex = (MTEX *)&buf[ofs];
 					int a = 10;
 				}
 				break;
 
 			case MK_TAG('M', 'M', 'D', 'X'):
+				{
+					MMDX *mmdx = (MMDX *)&buf[ofs];
+					int a = 10;
+				}
 				break;
 
 			case MK_TAG('M', 'M', 'I', 'D'):
 				break;
 
 			case MK_TAG('M', 'W', 'M', 'O'):
+				{
+					MWMO *mmdx = (MWMO *)&buf[ofs];
+					int a = 10;
+				}
 				break;
 
 			case MK_TAG('M', 'W', 'I', 'D'):
@@ -893,13 +1001,29 @@ struct MTEX : public ChunkHeader {
 				break;
 
 			case MK_TAG('M', 'O', 'D', 'F'):
+				{
+					int a = 10;
+				}
 				break;
 
 			case MK_TAG('M', 'H', '2', 'O'):
+				{
+					int a = 10;
+				}
 				break;
 
 			case MK_TAG('M', 'C', 'N', 'K'):
 				{
+					MCNK *mcnk = (MCNK *)&buf[ofs];
+					// fix up the pointers
+#define FIXUP(type, p) mcnk->ptr_ ## p = mcnk->ptr_ ## p ? (type *)&buf[ofs + uintptr_t(mcnk->ptr_ ## p)] : 0;
+					FIXUP(MCVT, height);
+					FIXUP(MCNR, normal);
+					FIXUP(MCLY, layer);
+					FIXUP(MCRF, refs);
+					FIXUP(MCAL, alpha);
+					FIXUP(MCSH, shadow);
+
 					int a = 10;
 				}
 				break;
